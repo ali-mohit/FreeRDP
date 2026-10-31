@@ -13,6 +13,7 @@ if(XVFB_RUN_EXECUTABLE AND WITH_XEXT AND X11_Xext_FOUND AND X11_Xtst_FOUND)
   add_test(NAME TestX11RailResize COMMAND ${XVFB_RUN_EXECUTABLE} -a -s "-screen 0 1280x1024x24 -nolisten tcp"
                                           $<TARGET_FILE:TestX11RailResize>
   )
+  set_tests_properties(TestX11RailResize PROPERTIES TIMEOUT 30)
 endif()
 
 if(XVFB_RUN_EXECUTABLE AND WITH_XRANDR AND X11_Xrandr_FOUND)

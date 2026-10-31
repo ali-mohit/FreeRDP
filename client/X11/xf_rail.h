@@ -41,6 +41,9 @@ struct xf_localmove
 	int root_y;
 	int window_x;
 	int window_y;
+	int window_width;
+	int window_height;
+	BOOL reconcileOnEnd;
 	/* Retain a received release while the WM geometry is still changing. */
 	BOOL completionPending;
 	int release_x;
@@ -68,6 +71,8 @@ struct xf_app_window
 	UINT32 dwExStyle;
 	UINT32 showState;
 	BOOL windowStyleKnown;
+	BOOL resizeCapabilityKnown;
+	BOOL canResize;
 	BOOL minMaxInfoKnown;
 	RAIL_MINMAXINFO_ORDER minMaxInfo;
 
@@ -117,6 +122,9 @@ struct xf_app_window
 	GC gc;
 	int shmid;
 	Window handle;
+	/* Input-only ring for the server's transparent, hit-testable margins. */
+	Window inputHandle;
+	BOOL inputMapped;
 	Window* xfwin;
 	BOOL fullscreen;
 	BOOL decorations;
@@ -162,6 +170,8 @@ BOOL xf_rail_adjust_position(xfContext* xfc, xfAppWindow* appWindow, BOOL* redra
 BOOL xf_rail_has_resize_margins(const xfAppWindow* appWindow);
 
 BOOL xf_rail_window_can_resize(const xfAppWindow* appWindow);
+
+void xf_rail_update_window_style(xfAppWindow* appWindow, UINT32 style, UINT32 extendedStyle);
 
 /* Return whether a surface repaint is required after releasing the window lock. */
 WINPR_ATTR_NODISCARD

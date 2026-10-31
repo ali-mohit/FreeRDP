@@ -298,6 +298,7 @@ struct xf_context
 	RailClientContext* rail;
 	wHashTable* railWindows;
 	UINT32 railActiveWindowId;
+	UINT64 railLocalMoveWindowId;
 	xfRailIconCache* railIconCache;
 
 #if defined(WITH_VERBOSE_WINPR_ASSERT)
