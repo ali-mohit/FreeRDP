@@ -968,7 +968,7 @@ void xf_SetWindowActions(xfContext* xfc, xfAppWindow* appWindow)
 	if (!(appWindow->dwStyle & WS_MINIMIZEBOX))
 		allowed_actions[1] = 0;
 
-	if (!(appWindow->dwStyle & WS_SIZEBOX))
+	if (!xf_rail_window_can_resize(appWindow))
 		allowed_actions[3] = 0;
 
 	if (!(appWindow->dwStyle & WS_MAXIMIZEBOX))
@@ -1168,7 +1168,9 @@ void xf_UpdateWindowSizeHints(xfContext* xfc, xfAppWindow* appWindow)
 	WINPR_ASSERT(xfc);
 	WINPR_ASSERT(appWindow);
 	if ((!appWindow->windowStyleKnown && !appWindow->minMaxInfoKnown) ||
-	    (appWindow->dwStyle & WS_MINIMIZE) || (appWindow->rail_state == WINDOW_SHOW_MINIMIZED))
+	    (appWindow->dwStyle & WS_MINIMIZE) ||
+	    ((appWindow->rail_state == WINDOW_SHOW_MINIMIZED) &&
+	     (appWindow->showState != WINDOW_SHOW) && (appWindow->showState != WINDOW_SHOW_MAXIMIZED)))
 		return;
 	XSizeHints hints = { .flags = PResizeInc, .width_inc = 1, .height_inc = 1 };
 	if (!xf_rail_window_can_resize(appWindow))
@@ -1193,10 +1195,126 @@ void xf_UpdateWindowSizeHints(xfContext* xfc, xfAppWindow* appWindow)
 	XSetWMNormalHints(xfc->display, appWindow->handle, &hints);
 }
 
+void xf_UpdateWindowInputRegion(xfContext* xfc, xfAppWindow* appWindow)
+{
+	WINPR_ASSERT(xfc);
+	WINPR_ASSERT(appWindow);
+#ifdef WITH_XEXT
+	if (!xfc->display)
+		return;
+	if (!appWindow->is_mapped || appWindow->is_transient || appWindow->decorations ||
+	    appWindow->configureGeometryPending || !xf_rail_window_can_resize(appWindow) ||
+	    !xf_rail_has_resize_margins(appWindow) ||
+	    (appWindow->dwStyle & (WS_CHILD | WS_DISABLED | WS_MINIMIZE | WS_MAXIMIZE)) ||
+	    (appWindow->dwExStyle & WS_EX_NOACTIVATE) ||
+	    (appWindow->rail_state == WINDOW_SHOW_MINIMIZED) ||
+	    (appWindow->rail_state == WINDOW_SHOW_MAXIMIZED))
+		goto hide;
+	const INT64 left = appWindow->resizeMarginLeft;
+	const INT64 top = appWindow->resizeMarginTop;
+	const INT64 right = appWindow->resizeMarginRight;
+	const INT64 bottom = appWindow->resizeMarginBottom;
+	const INT64 width = (INT64)appWindow->width + left + right;
+	const INT64 height = (INT64)appWindow->height + top + bottom;
+	const INT64 x = (INT64)appWindow->x - left;
+	const INT64 y = (INT64)appWindow->y - top;
+	if (!(left || top || right || bottom) || (appWindow->width <= 0) || (appWindow->height <= 0) ||
+	    (width > INT16_MAX) || (height > INT16_MAX) || (x < INT16_MIN) || (x > INT16_MAX) ||
+	    (y < INT16_MIN) || (y > INT16_MAX))
+		goto hide;
+
+	/* Follow the owner's WM frame in the root stacking order. Placing a
+	 * shaped input-only sibling immediately above that frame covers its
+	 * margins without occluding the owner's content or foreground windows. */
+	Window sibling = appWindow->handle;
+	Window root = None;
+	for (size_t level = 0; level < 64; level++)
+	{
+		Window parent = None;
+		Window* children = nullptr;
+		unsigned int count = 0;
+		const Status rc = XQueryTree(xfc->display, sibling, &root, &parent, &children, &count);
+		if (children)
+			XFree(children);
+		if (!rc || !parent)
+			goto hide;
+		if (parent == root)
+			break;
+		sibling = parent;
+		if (level == 63)
+			goto hide;
+	}
+	XWindowAttributes attributes = WINPR_C_ARRAY_INIT;
+	if (!XGetWindowAttributes(xfc->display, appWindow->handle, &attributes) ||
+	    (attributes.map_state != IsViewable))
+		goto hide;
+	if (!appWindow->inputHandle)
+	{
+		int eventBase = 0;
+		int errorBase = 0;
+		if (!XShapeQueryExtension(xfc->display, &eventBase, &errorBase))
+			return;
+		XSetWindowAttributes attrs = { .override_redirect = True,
+			                           .event_mask = ButtonPressMask | ButtonReleaseMask |
+			                                         PointerMotionMask | EnterWindowMask |
+			                                         LeaveWindowMask };
+		appWindow->inputHandle =
+		    XCreateWindow(xfc->display, root, (int)x, (int)y, (unsigned)width, (unsigned)height, 0,
+		                  0, InputOnly, CopyFromParent, CWOverrideRedirect | CWEventMask, &attrs);
+		if (!appWindow->inputHandle)
+			return;
+	}
+	XRectangle rects[4] = WINPR_C_ARRAY_INIT;
+	int count = 0;
+	if (top)
+		rects[count++] = (XRectangle){ 0, 0, (unsigned short)width, (unsigned short)top };
+	if (left)
+		rects[count++] =
+		    (XRectangle){ 0, (short)top, (unsigned short)left, (unsigned short)appWindow->height };
+	if (right)
+		rects[count++] = (XRectangle){ (short)(left + appWindow->width), (short)top,
+			                           (unsigned short)right, (unsigned short)appWindow->height };
+	if (bottom)
+		rects[count++] = (XRectangle){ 0, (short)(top + appWindow->height), (unsigned short)width,
+			                           (unsigned short)bottom };
+	XShapeCombineRectangles(xfc->display, appWindow->inputHandle, ShapeBounding, 0, 0, rects, count,
+	                        ShapeSet, Unsorted);
+	XWindowChanges changes = { .x = (int)x,
+		                       .y = (int)y,
+		                       .width = (int)width,
+		                       .height = (int)height,
+		                       .sibling = sibling,
+		                       .stack_mode = Above };
+	XConfigureWindow(xfc->display, appWindow->inputHandle,
+	                 CWX | CWY | CWWidth | CWHeight | CWSibling | CWStackMode, &changes);
+#ifdef WITH_XCURSOR
+	if (xfc->appWindow == appWindow && xfc->pointer)
+		XDefineCursor(xfc->display, appWindow->inputHandle, xfc->pointer->cursor);
+#endif
+	if (!appWindow->inputMapped)
+	{
+		XMapWindow(xfc->display, appWindow->inputHandle);
+		appWindow->inputMapped = TRUE;
+	}
+	return;
+hide:
+	if (appWindow->inputMapped)
+	{
+		XUnmapWindow(xfc->display, appWindow->inputHandle);
+		appWindow->inputMapped = FALSE;
+	}
+#endif
+}
+
 void xf_StartLocalMoveSize(xfContext* xfc, xfAppWindow* appWindow, int direction, int x, int y)
 {
 	if (appWindow->local_move.state != LMS_NOT_ACTIVE)
 		return;
+	if (xfc->railLocalMoveWindowId && (xfc->railLocalMoveWindowId != appWindow->windowId))
+	{
+		WLog_Print(xfc->log, WLOG_WARN, "[rail-geometry] overlapping local move rejected");
+		return;
+	}
 
 	/*
 	 * Save original mouse location relative to root.  This will be needed
@@ -1204,6 +1322,12 @@ void xf_StartLocalMoveSize(xfContext* xfc, xfAppWindow* appWindow, int direction
 	 */
 	appWindow->local_move.root_x = x;
 	appWindow->local_move.root_y = y;
+	appWindow->local_move.window_x = appWindow->x;
+	appWindow->local_move.window_y = appWindow->y;
+	appWindow->local_move.window_width = appWindow->width;
+	appWindow->local_move.window_height = appWindow->height;
+	appWindow->local_move.reconcileOnEnd = FALSE;
+	xfc->railLocalMoveWindowId = appWindow->windowId;
 	appWindow->local_move.state = LMS_STARTING;
 	appWindow->local_move.completionPending = FALSE;
 	appWindow->localMoveGeometryTime = 0;
@@ -1211,8 +1335,10 @@ void xf_StartLocalMoveSize(xfContext* xfc, xfAppWindow* appWindow, int direction
 	appWindow->serverGeometryPending = FALSE;
 	xf_UpdateWindowVisibilityRects(xfc, appWindow);
 	WLog_Print(xfc->log, WLOG_DEBUG,
-	           "[rail-geometry] local move start windowId=0x%08" PRIx64 " direction=%d",
-	           appWindow->windowId, direction);
+	           "[rail-geometry] local move start windowId=0x%08" PRIx64
+	           " direction=%d pointer=%d,%d geometry=%d,%d %dx%d",
+	           appWindow->windowId, direction, x, y, appWindow->x, appWindow->y, appWindow->width,
+	           appWindow->height);
 
 	xf_ungrab(xfc);
 
@@ -1260,11 +1386,18 @@ BOOL xf_EndLocalMoveSize(xfContext* xfc, xfAppWindow* appWindow)
 	 * gesture. Updates received while terminating are already applied; later
 	 * updates will apply normally. Replaying the cache here produces an X11
 	 * configure that can undo the completed move through ClientWindowMove.
-	 * Only a server cancellation needs geometry deferred by an active WM move. */
-	if (!completedLocally && appWindow->serverGeometryPending)
+	 * Reconcile deferred bounds on cancellation or when the WM never changed
+	 * the local rectangle and Windows completed the operation instead. */
+	if ((!completedLocally || appWindow->local_move.reconcileOnEnd) &&
+	    appWindow->serverGeometryPending)
 		redraw = xf_rail_reconcile_window(xfc, appWindow);
 	appWindow->serverGeometryPending = FALSE;
+	appWindow->local_move.window_width = appWindow->local_move.window_height = 0;
+	appWindow->local_move.reconcileOnEnd = FALSE;
+	if (xfc->railLocalMoveWindowId == appWindow->windowId)
+		xfc->railLocalMoveWindowId = 0;
 	xf_UpdateWindowVisibilityRects(xfc, appWindow);
+	xf_UpdateWindowInputRegion(xfc, appWindow);
 	return redraw;
 }
 
@@ -1298,6 +1431,7 @@ BOOL xf_MoveWindow(xfContext* xfc, xfAppWindow* appWindow, int x, int y, int wid
 	else
 		LogDynAndXMoveWindow(xfc->log, xfc->display, appWindow->handle, x, y);
 
+	xf_UpdateWindowInputRegion(xfc, appWindow);
 	return xf_UpdateWindowArea(xfc, appWindow, 0, 0, width, height);
 }
 
@@ -1568,6 +1702,8 @@ void xf_DestroyWindow(xfContext* xfc, xfAppWindow* appWindow)
 
 	if (appWindow->handle)
 	{
+		if (appWindow->inputHandle)
+			XDestroyWindow(xfc->display, appWindow->inputHandle);
 		LogDynAndXUnmapWindow(xfc->log, xfc->display, appWindow->handle);
 		LogDynAndXDestroyWindow(xfc->log, xfc->display, appWindow->handle);
 	}
@@ -1636,7 +1772,7 @@ xfAppWindow* xf_AppWindowFromX11WindowFrom(xfContext* xfc, Window wnd, const cha
 			return nullptr;
 		}
 
-		if (appWindow->handle == wnd)
+		if ((appWindow->handle == wnd) || (appWindow->inputHandle && appWindow->inputHandle == wnd))
 		{
 			free(pKeys);
 			return appWindow;

@@ -136,6 +136,7 @@ void xf_SetWindowMinMaxInfo(xfContext* xfc, xfAppWindow* appWindow, int maxWidth
                             int maxPosX, int maxPosY, int minTrackWidth, int minTrackHeight,
                             int maxTrackWidth, int maxTrackHeight);
 void xf_UpdateWindowSizeHints(xfContext* xfc, xfAppWindow* appWindow);
+void xf_UpdateWindowInputRegion(xfContext* xfc, xfAppWindow* appWindow);
 void xf_StartLocalMoveSize(xfContext* xfc, xfAppWindow* appWindow, int direction, int x, int y);
 /* Return whether a surface repaint is required after releasing the window lock. */
 WINPR_ATTR_NODISCARD

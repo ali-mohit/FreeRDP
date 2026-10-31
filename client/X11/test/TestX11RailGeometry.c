@@ -28,6 +28,7 @@ static unsigned releases;
 static int releaseX;
 static int releaseY;
 static Bool pointerSuccess = True;
+static unsigned int pointerMask;
 static BOOL inputSuccess = TRUE;
 static KeySym lookupKey = XK_Return;
 static Status attributesSuccess = 1;
@@ -81,7 +82,7 @@ Bool XQueryPointer(Display* display, Window window, Window* root, Window* child,
 	*rx = explicitPointerPosition ? pointerX : rootX;
 	*ry = explicitPointerPosition ? pointerY : rootY;
 	*cx = *cy = 0;
-	*mask = 0;
+	*mask = pointerMask;
 	return pointerSuccess;
 }
 
@@ -185,6 +186,26 @@ void XLockDisplay(Display* display)
 void XUnlockDisplay(Display* display)
 {
 	WINPR_UNUSED(display);
+}
+
+Bool XGetEventData(Display* display, XGenericEventCookie* cookie)
+{
+	WINPR_UNUSED(display);
+	WINPR_UNUSED(cookie);
+	return False;
+}
+
+void XFreeEventData(Display* display, XGenericEventCookie* cookie)
+{
+	WINPR_UNUSED(display);
+	WINPR_UNUSED(cookie);
+}
+
+int XSync(Display* display, Bool discard)
+{
+	WINPR_UNUSED(display);
+	WINPR_UNUSED(discard);
+	return 1;
 }
 
 int XMoveWindow(Display* display, Window window, int x, int y)
@@ -1080,6 +1101,221 @@ out:
 	return FALSE;
 }
 
+static BOOL test_connection_move_owner(xfContext* xfc)
+{
+	BOOL inserted = FALSE;
+	xfAppWindow other = { .xfc = xfc,
+		                  .windowId = 0x300d1,
+		                  .handle = 0x100,
+		                  .is_mapped = TRUE,
+		                  .dwStyle = WS_CAPTION | WS_SYSMENU };
+	freerdp instance = { .context = &xfc->common.context };
+	const RAIL_LOCALMOVESIZE_ORDER end = { .windowId = (UINT32)appWindow.windowId };
+	appWindow.surfaceId = UINT32_MAX;
+	appWindow.is_mapped = TRUE;
+	appWindow.windowStyleKnown = TRUE;
+	appWindow.dwStyle = WS_CAPTION | WS_SYSMENU | WS_SIZEBOX;
+	appWindow.resizeMarginXKnown = appWindow.resizeMarginYKnown = TRUE;
+	appWindow.resizeMarginLeft = appWindow.resizeMarginRight = 7;
+	appWindow.resizeMarginTop = 0;
+	appWindow.resizeMarginBottom = 7;
+	appWindow.local_move =
+	    (xfLocalMove){ .state = LMS_ACTIVE, .direction = NET_WM_MOVERESIZE_MOVE };
+	appWindow.configureGeometryPending = FALSE;
+	appWindow.serverGeometryPending = FALSE;
+	appWindow.x = appWindow.windowOffsetX = rootX = 80;
+	appWindow.y = appWindow.windowOffsetY = rootY = 90;
+	appWindow.width = appWindow.windowWidth = currentWidth = 400;
+	appWindow.height = appWindow.windowHeight = currentHeight = 300;
+	xfc->railLocalMoveWindowId = appWindow.windowId;
+	pointerMask = Button1Mask;
+	CHECK(HashTable_Insert(xfc->railWindows, &other.windowId, &other));
+	inserted = TRUE;
+	const unsigned inputsBefore = inputSequence;
+	const unsigned before = releases;
+	const unsigned movesBefore = moves;
+	CHECK(xf_generic_MotionNotify(xfc, 10, 10, other.handle, TRUE));
+	CHECK(xf_generic_ButtonEvent(xfc, 10, 10, Button1, other.handle, TRUE, TRUE));
+	const XEvent focus = { .xfocus = {
+		                       .type = FocusIn, .window = other.handle, .mode = NotifyNormal } };
+	CHECK(xf_event_process(&instance, &focus));
+	CHECK(inputSequence == inputsBefore && releases == before);
+	XEvent ungrab = { .xcrossing = { .type = EnterNotify,
+		                             .window = appWindow.handle,
+		                             .mode = NotifyUngrab,
+		                             .x_root = 700,
+		                             .y_root = 250 } };
+	CHECK(xf_event_process(&instance, &ungrab));
+	CHECK(appWindow.local_move.state == LMS_ACTIVE && releases == before);
+	pointerMask = 0;
+	CHECK(xf_event_process(&instance, &ungrab));
+	CHECK(appWindow.local_move.state == LMS_TERMINATING && releases == before + 1);
+	CHECK(releaseX == 700 && releaseY == 250 && moves == movesBefore);
+	const XEvent up = { .xbutton = { .type = ButtonRelease,
+		                             .window = other.handle,
+		                             .button = Button1,
+		                             .x_root = 999,
+		                             .y_root = 999 } };
+	CHECK(xf_event_process(&instance, &up));
+	CHECK(releases == before + 1);
+	CHECK(xfc->rail->ServerLocalMoveSize(xfc->rail, &end) == CHANNEL_RC_OK);
+	CHECK(!xfc->railLocalMoveWindowId);
+
+	/* A release on another window retains its event coordinates while a
+	 * changing geometry snapshot is retried, including a tiled mouse move. */
+	appWindow.local_move = (xfLocalMove){ .state = LMS_ACTIVE,
+		                                  .direction = NET_WM_MOVERESIZE_MOVE,
+		                                  .window_width = 400,
+		                                  .window_height = 300 };
+	appWindow.windowMovePending = FALSE;
+	xfc->railLocalMoveWindowId = appWindow.windowId;
+	currentWidth = 500;
+	changingAttributes = TRUE;
+	XEvent deferred = up;
+	deferred.xbutton.x_root = 740;
+	deferred.xbutton.y_root = 310;
+	CHECK(xf_event_process(&instance, &deferred));
+	CHECK(releases == before + 1 && appWindow.local_move.completionPending);
+	changingAttributes = FALSE;
+	rootX = 900;
+	rootY = 450;
+	xf_rail_flush_configure_geometry(xfc);
+	CHECK(releases == before + 2 && releaseX == 740 && releaseY == 310);
+	CHECK(moves == movesBefore + 1 && lastMove.right - lastMove.left == 514);
+	CHECK(xfc->rail->ServerLocalMoveSize(xfc->rail, &end) == CHANNEL_RC_OK);
+
+	/* The WM never resized locally, but Windows has newer bounds. Do not
+	 * overwrite those bounds with the stale local size at completion. */
+	appWindow.x = rootX = 80;
+	appWindow.y = rootY = 90;
+	appWindow.width = currentWidth = 400;
+	appWindow.height = currentHeight = 300;
+	appWindow.windowOffsetX = 80;
+	appWindow.windowOffsetY = 90;
+	appWindow.windowWidth = 700;
+	appWindow.windowHeight = 500;
+	appWindow.serverGeometryPending = TRUE;
+	appWindow.local_move = (xfLocalMove){ .state = LMS_STARTING,
+		                                  .direction = NET_WM_MOVERESIZE_SIZE_BOTTOMRIGHT,
+		                                  .window_x = 80,
+		                                  .window_y = 90,
+		                                  .window_width = 400,
+		                                  .window_height = 300 };
+	xfc->railLocalMoveWindowId = appWindow.windowId;
+	CHECK(xf_event_check_local_move(xfc));
+	CHECK(appWindow.local_move.reconcileOnEnd && moves == movesBefore + 1);
+	CHECK(xfc->rail->ServerLocalMoveSize(xfc->rail, &end) == CHANNEL_RC_OK);
+	CHECK(appWindow.width == 700 && appWindow.height == 500);
+	CHECK(!xfc->railLocalMoveWindowId);
+
+	/* XI2's common button path resolves the connection owner too. */
+	appWindow.local_move =
+	    (xfLocalMove){ .state = LMS_ACTIVE, .direction = NET_WM_MOVERESIZE_MOVE };
+	currentWidth = 700;
+	currentHeight = 500;
+	xfc->railLocalMoveWindowId = appWindow.windowId;
+	CHECK(xf_generic_ButtonEvent(xfc, 10, 10, Button1, other.handle, TRUE, FALSE));
+	CHECK(releases == before + 4 && appWindow.local_move.state == LMS_TERMINATING);
+	CHECK(xfc->rail->ServerLocalMoveSize(xfc->rail, &end) == CHANNEL_RC_OK);
+
+	/* A queued motion predates a WM-consumed release. Infer completion from
+	 * the current pointer, not the older coordinates in that motion event. */
+	appWindow.local_move =
+	    (xfLocalMove){ .state = LMS_ACTIVE, .direction = NET_WM_MOVERESIZE_MOVE };
+	xfc->railLocalMoveWindowId = appWindow.windowId;
+	const XEvent motion = {
+		.xmotion = { .type = MotionNotify, .window = other.handle, .x_root = 1, .y_root = 2 }
+	};
+	CHECK(xf_event_process(&instance, &motion));
+	CHECK(releases == before + 5 && releaseX == rootX && releaseY == rootY);
+	CHECK(xfc->rail->ServerLocalMoveSize(xfc->rail, &end) == CHANNEL_RC_OK);
+
+	/* A changed size alone never authorizes guessing margins or resizing a
+	 * fixed window. Keep the existing mouse-move-only completion in both cases. */
+	for (size_t fixed = 0; fixed < 2; fixed++)
+	{
+		appWindow.resizeMarginXKnown = fixed != 0;
+		appWindow.dwStyle = WS_CAPTION | WS_SYSMENU | (fixed ? 0 : WS_SIZEBOX);
+		appWindow.local_move = (xfLocalMove){ .state = LMS_ACTIVE,
+			                                  .direction = NET_WM_MOVERESIZE_MOVE,
+			                                  .window_width = 400,
+			                                  .window_height = 300 };
+		xfc->railLocalMoveWindowId = appWindow.windowId;
+		CHECK(xf_event_process(&instance, &up));
+		CHECK(moves == movesBefore + 1);
+		CHECK(xfc->rail->ServerLocalMoveSize(xfc->rail, &end) == CHANNEL_RC_OK);
+	}
+	HashTable_ValueObject(xfc->railWindows)->fnObjectFree = nullptr;
+	HashTable_Remove(xfc->railWindows, &other.windowId);
+	return TRUE;
+out:
+	changingAttributes = FALSE;
+	pointerMask = 0;
+	if (inserted)
+	{
+		HashTable_ValueObject(xfc->railWindows)->fnObjectFree = nullptr;
+		HashTable_Remove(xfc->railWindows, &other.windowId);
+	}
+	return FALSE;
+}
+
+static BOOL test_resize_style_transitions(xfContext* xfc)
+{
+	const UINT32 normal = WS_VISIBLE | WS_CAPTION | WS_SYSMENU | WS_SIZEBOX;
+	const UINT32 stripped = WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+	appWindow.resizeCapabilityKnown = FALSE;
+	appWindow.rail_state = WINDOW_SHOW;
+	appWindow.showState = WINDOW_SHOW;
+	xf_rail_update_window_style(&appWindow, normal, 0);
+	xf_SetWindowMinMaxInfo(xfc, &appWindow, 0, 0, 0, 0, 136, 39, 1940, 1220);
+	xf_rail_update_window_style(&appWindow, stripped, 0);
+	xf_UpdateWindowSizeHints(xfc, &appWindow);
+	CHECK(xf_rail_window_can_resize(&appWindow));
+	CHECK(sizeHints.min_width == 136 && sizeHints.max_width == 1940);
+	CHECK(sizeHints.min_height == 39 && sizeHints.max_height == 1220);
+	/* Popup is a window category, not evidence that its frame survived. */
+	xf_rail_update_window_style(&appWindow, normal | WS_POPUP, 0);
+	xf_rail_update_window_style(&appWindow, stripped | WS_POPUP, 0);
+	CHECK(xf_rail_window_can_resize(&appWindow));
+	/* A complete style update can legitimately remove resize permission. */
+	xf_rail_update_window_style(&appWindow, normal & ~WS_SIZEBOX, 0);
+	xf_rail_update_window_style(&appWindow, stripped, 0);
+	xf_UpdateWindowSizeHints(xfc, &appWindow);
+	CHECK(!xf_rail_window_can_resize(&appWindow));
+	CHECK(sizeHints.min_width == (int)appWindow.windowWidth);
+	CHECK(sizeHints.max_width == (int)appWindow.windowWidth);
+	xf_rail_update_window_style(&appWindow, normal, 0);
+	xf_UpdateWindowSizeHints(xfc, &appWindow);
+	CHECK(sizeHints.min_width == 136 && sizeHints.max_width == 1940);
+
+	/* Windows can restore during a mouse move. Those known server bounds
+	 * need no second resize request; subsequent genuinely local tiling does. */
+	const unsigned before = moves;
+	const unsigned beforeRelease = releases;
+	appWindow.local_move = (xfLocalMove){ .state = LMS_ACTIVE,
+		                                  .direction = NET_WM_MOVERESIZE_MOVE,
+		                                  .window_width = 1854,
+		                                  .window_height = 1168 };
+	appWindow.width = appWindow.windowWidth = 863;
+	appWindow.height = appWindow.windowHeight = 884;
+	appWindow.serverGeometryPending = TRUE;
+	appWindow.configureGeometryPending = FALSE;
+	CHECK(xf_rail_end_local_move(xfc, &appWindow));
+	CHECK(moves == before && releases == beforeRelease + 1);
+	appWindow.local_move = (xfLocalMove){ .state = LMS_ACTIVE,
+		                                  .direction = NET_WM_MOVERESIZE_MOVE,
+		                                  .window_width = 863,
+		                                  .window_height = 884 };
+	appWindow.width = 927;
+	appWindow.height = 1168;
+	appWindow.windowMovePending = FALSE;
+	CHECK(xf_rail_end_local_move(xfc, &appWindow));
+	CHECK(moves == before + 1 && releases == beforeRelease + 2);
+	return TRUE;
+out:
+	return FALSE;
+}
+
 int main(int argc, char* argv[])
 {
 	WINPR_UNUSED(argc);
@@ -1124,6 +1360,8 @@ int main(int argc, char* argv[])
 	CHECK(test_fixed_size_hints(&xfc));
 	CHECK(test_pointer_activation(&xfc));
 	CHECK(test_deferred_repaint(&xfc));
+	CHECK(test_connection_move_owner(&xfc));
+	CHECK(test_resize_style_transitions(&xfc));
 	result = 0;
 out:
 	if (railInitialized)
