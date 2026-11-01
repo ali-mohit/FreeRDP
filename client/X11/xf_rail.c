@@ -495,11 +495,25 @@ void xf_rail_update_window_style(xfAppWindow* appWindow, UINT32 style, UINT32 ex
 	if (!appWindow->resizeCapabilityKnown || (style & frame))
 	{
 		appWindow->canResize = (style & WS_SIZEBOX) != 0;
+		appWindow->hasServerFrame = (style & WS_CAPTION) != 0;
 		appWindow->resizeCapabilityKnown = TRUE;
 	}
 	appWindow->dwStyle = style;
 	appWindow->dwExStyle = extendedStyle;
 	appWindow->windowStyleKnown = TRUE;
+}
+
+static BOOL xf_rail_can_use_window_move(const xfAppWindow* appWindow)
+{
+	if (!xf_rail_has_resize_margins(appWindow))
+		return FALSE;
+	/* A fixed framed window can advertise zero hit-test resize margins
+	 * without exposing its transparent frame extents. Sending its visible
+	 * size as an outer rectangle can then shrink it on every WM move.
+	 * Retain server-driven movement rather than infer those frame extents. */
+	return xf_rail_window_can_resize(appWindow) || !appWindow->hasServerFrame ||
+	       appWindow->resizeMarginLeft || appWindow->resizeMarginRight ||
+	       appWindow->resizeMarginTop || appWindow->resizeMarginBottom;
 }
 
 BOOL xf_rail_reconcile_window(xfContext* xfc, xfAppWindow* appWindow)
@@ -520,7 +534,7 @@ BOOL xf_rail_reconcile_window(xfContext* xfc, xfAppWindow* appWindow)
 
 static BOOL xf_rail_send_window_move(xfContext* xfc, xfAppWindow* appWindow)
 {
-	if (!xf_rail_has_resize_margins(appWindow))
+	if (!xf_rail_can_use_window_move(appWindow))
 	{
 		/* A visible rectangle is not necessarily an outer rectangle, even
 		 * for a fixed-size dialog. Never silently turn a move into a resize.
@@ -529,10 +543,11 @@ static BOOL xf_rail_send_window_move(xfContext* xfc, xfAppWindow* appWindow)
 		if (!appWindow->unknownMarginWarning)
 		{
 			WLog_Print(xfc->log, WLOG_WARN,
-			           "[rail-geometry] refusing WINDOWMOVE with unknown resize margins"
-			           " windowId=0x%08" PRIx64 " known-x=%d known-y=%d",
+			           "[rail-geometry] refusing WINDOWMOVE with unusable resize margins"
+			           " windowId=0x%08" PRIx64 " known-x=%d known-y=%d framed=%d resizable=%d",
 			           appWindow->windowId, appWindow->resizeMarginXKnown,
-			           appWindow->resizeMarginYKnown);
+			           appWindow->resizeMarginYKnown, appWindow->hasServerFrame,
+			           xf_rail_window_can_resize(appWindow));
 			appWindow->unknownMarginWarning = TRUE;
 		}
 		return FALSE;
@@ -622,8 +637,8 @@ BOOL xf_rail_adjust_position(xfContext* xfc, xfAppWindow* appWindow, BOOL* redra
 
 	/* Keep legitimate local moves: the server needs the WM's final geometry
 	 * to route mouse input correctly. Matching server echoes need no report. */
-	if (!xf_rail_window_can_resize(appWindow) && appWindow->windowWidth &&
-	    appWindow->windowHeight &&
+	if (!xf_rail_window_can_resize(appWindow) && xf_rail_can_use_window_move(appWindow) &&
+	    appWindow->windowWidth && appWindow->windowHeight &&
 	    ((appWindow->width != (INT64)appWindow->windowWidth) ||
 	     (appWindow->height != (INT64)appWindow->windowHeight)))
 	{
@@ -645,7 +660,7 @@ BOOL xf_rail_adjust_position(xfContext* xfc, xfAppWindow* appWindow, BOOL* redra
 	    appWindow->width != (INT64)appWindow->windowWidth ||
 	    appWindow->height != (INT64)appWindow->windowHeight)
 	{
-		if (!xf_rail_has_resize_margins(appWindow))
+		if (!xf_rail_can_use_window_move(appWindow))
 		{
 			/* An independent WM/client configure is not a native RAIL mouse
 			 * move. Reject its unsafe rectangle and restore authoritative
@@ -980,7 +995,7 @@ static BOOL xf_rail_window_common(rdpContext* context, const WINDOW_ORDER_INFO* 
 		appWindow->resizeMarginBottom = windowState->resizeMarginBottom;
 		appWindow->resizeMarginYKnown = TRUE;
 	}
-	if (xf_rail_has_resize_margins(appWindow))
+	if (xf_rail_can_use_window_move(appWindow))
 		appWindow->unknownMarginWarning = FALSE;
 
 	if (fieldFlags & WINDOW_ORDER_FIELD_OWNER)
@@ -1757,11 +1772,11 @@ static UINT xf_rail_server_local_move_size(RailClientContext* context,
 	/* Keep keyboard moves and resizes server-driven if their required
 	 * outer rectangle cannot be formed safely. Do not inherit an owner's
 	 * frame or guess a DPI-dependent border for this window. */
-	if ((direction != NET_WM_MOVERESIZE_MOVE) && !xf_rail_has_resize_margins(appWindow))
+	if ((direction != NET_WM_MOVERESIZE_MOVE) && !xf_rail_can_use_window_move(appWindow))
 	{
 		WLog_Print(xfc->log, WLOG_DEBUG,
 		           "[rail-geometry] server-driven move/resize windowId=0x%08" PRIx64
-		           " direction=%d: resize margins unknown",
+		           " direction=%d: outer bounds unavailable",
 		           appWindow->windowId, direction);
 	}
 	else

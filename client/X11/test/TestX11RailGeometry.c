@@ -989,7 +989,7 @@ out:
 static BOOL test_fixed_size_hints(xfContext* xfc)
 {
 	appWindow.windowStyleKnown = TRUE;
-	appWindow.dwStyle = WS_CAPTION | WS_SYSMENU;
+	xf_rail_update_window_style(&appWindow, WS_CAPTION | WS_SYSMENU, 0);
 	appWindow.windowWidth = 413;
 	appWindow.windowHeight = 229;
 	xf_SetWindowMinMaxInfo(xfc, &appWindow, 0, 0, 0, 0, 136, 39, 1670, 932);
@@ -1000,12 +1000,12 @@ static BOOL test_fixed_size_hints(xfContext* xfc)
 	appWindow.windowHeight = 250;
 	xf_UpdateWindowSizeHints(xfc, &appWindow);
 	CHECK(sizeHints.min_width == 450 && sizeHints.max_width == 450);
-	appWindow.dwStyle |= WS_SIZEBOX;
+	xf_rail_update_window_style(&appWindow, appWindow.dwStyle | WS_SIZEBOX, 0);
 	xf_UpdateWindowSizeHints(xfc, &appWindow);
 	CHECK(xf_rail_window_can_resize(&appWindow));
 	CHECK(sizeHints.min_width == 136 && sizeHints.max_width == 1670);
 	CHECK(sizeHints.min_height == 39 && sizeHints.max_height == 932);
-	appWindow.dwStyle &= ~WS_SIZEBOX;
+	xf_rail_update_window_style(&appWindow, appWindow.dwStyle & ~WS_SIZEBOX, 0);
 	appWindow.local_move.state = LMS_NOT_ACTIVE;
 	appWindow.localMoveGeometryTime = 0;
 	appWindow.windowMovePending = FALSE;
@@ -1016,14 +1016,16 @@ static BOOL test_fixed_size_hints(xfContext* xfc)
 	appWindow.width = 600;
 	appWindow.height = 500;
 	appWindow.resizeMarginXKnown = appWindow.resizeMarginYKnown = TRUE;
-	appWindow.resizeMarginLeft = appWindow.resizeMarginRight = 0;
-	appWindow.resizeMarginTop = appWindow.resizeMarginBottom = 0;
+	appWindow.resizeMarginLeft = appWindow.resizeMarginRight = 7;
+	appWindow.resizeMarginTop = 0;
+	appWindow.resizeMarginBottom = 7;
 	CHECK(adjust_local_geometry(xfc, &appWindow, nullptr));
 	CHECK(appWindow.x == 80 && appWindow.y == 90);
 	CHECK(appWindow.width == 450 && appWindow.height == 250);
-	CHECK(lastMove.left == 80 && lastMove.top == 90);
-	CHECK(lastMove.right - lastMove.left == 450 && lastMove.bottom - lastMove.top == 250);
+	CHECK(lastMove.left == 73 && lastMove.top == 90);
+	CHECK(lastMove.right - lastMove.left == 464 && lastMove.bottom - lastMove.top == 257);
 	appWindow.windowStyleKnown = FALSE;
+	appWindow.resizeCapabilityKnown = FALSE;
 	CHECK(xf_rail_window_can_resize(&appWindow));
 	return TRUE;
 out:
@@ -1585,6 +1587,56 @@ out:
 	return FALSE;
 }
 
+static BOOL test_fixed_frame_zero_margins(xfContext* xfc)
+{
+	const unsigned before = moves;
+	appWindow.local_move.state = LMS_NOT_ACTIVE;
+	appWindow.localMoveGeometryTime = 0;
+	appWindow.windowGeometryPending = FALSE;
+	appWindow.serverConfigure = FALSE;
+	appWindow.stateGeometryPending = FALSE;
+	appWindow.windowWidth = 399;
+	appWindow.windowHeight = 222;
+	appWindow.windowOffsetX = 430;
+	appWindow.windowOffsetY = 354;
+	appWindow.x = 300;
+	appWindow.y = 180;
+	appWindow.width = 650;
+	appWindow.height = 500;
+	appWindow.resizeMarginXKnown = appWindow.resizeMarginYKnown = TRUE;
+	appWindow.resizeMarginLeft = appWindow.resizeMarginRight = 0;
+	appWindow.resizeMarginTop = appWindow.resizeMarginBottom = 0;
+	appWindow.lastUnknownMarginReconcile = 0;
+	xf_rail_update_window_style(&appWindow, WS_VISIBLE | WS_CAPTION | WS_SYSMENU, 0);
+	xf_rail_update_window_style(&appWindow, WS_SYSMENU, 0);
+	CHECK(appWindow.hasServerFrame && !xf_rail_window_can_resize(&appWindow));
+	CHECK(xf_rail_adjust_position(xfc, &appWindow, nullptr));
+	CHECK(appWindow.windowGeometryPending && moves == before);
+	CHECK(appWindow.requestedGeometry.x == 430 && appWindow.requestedGeometry.width == 399);
+	CHECK(acknowledge_window_request(xfc));
+	CHECK(appWindow.x == 430 && appWindow.width == 399 && appWindow.height == 222);
+	/* Keyboard movement also remains server-driven for this frame. */
+	const RAIL_LOCALMOVESIZE_ORDER start = { .windowId = (UINT32)appWindow.windowId,
+		                                     .isMoveSizeStart = TRUE,
+		                                     .moveSizeType = RAIL_WMSZ_KEYMOVE };
+	CHECK(xfc->rail->ServerLocalMoveSize(xfc->rail, &start) == CHANNEL_RC_OK);
+	CHECK(appWindow.local_move.state == LMS_NOT_ACTIVE && appWindow.serverMoveActive);
+	const RAIL_LOCALMOVESIZE_ORDER end = { .windowId = (UINT32)appWindow.windowId,
+		                                   .posX = 430,
+		                                   .posY = 354 };
+	CHECK(xfc->rail->ServerLocalMoveSize(xfc->rail, &end) == CHANNEL_RC_OK);
+	CHECK(!appWindow.serverMoveActive && moves == before);
+	/* An explicit borderless style with zero margins remains convertible. */
+	xf_rail_update_window_style(&appWindow, WS_VISIBLE | WS_POPUP, 0);
+	appWindow.serverConfigure = FALSE;
+	appWindow.x = 450;
+	CHECK(!appWindow.hasServerFrame && xf_rail_adjust_position(xfc, &appWindow, nullptr));
+	CHECK(moves == before + 1 && lastMove.left == 450);
+	return TRUE;
+out:
+	return FALSE;
+}
+
 int main(int argc, char* argv[])
 {
 	WINPR_UNUSED(argc);
@@ -1634,6 +1686,7 @@ int main(int argc, char* argv[])
 	CHECK(test_requested_observed_geometry(&xfc));
 	CHECK(test_move_end_position(&xfc));
 	CHECK(test_tiled_position_before_size(&xfc));
+	CHECK(test_fixed_frame_zero_margins(&xfc));
 	result = 0;
 out:
 	if (railInitialized)

@@ -83,6 +83,7 @@ struct xf_app_window
 	BOOL windowStyleKnown;
 	BOOL resizeCapabilityKnown;
 	BOOL canResize;
+	BOOL hasServerFrame;
 	BOOL minMaxInfoKnown;
 	RAIL_MINMAXINFO_ORDER minMaxInfo;
 
