@@ -2206,6 +2206,18 @@ static long transport_layer_bio_ctrl(BIO* bio, int cmd, long arg1, void* arg2)
 			status = 0;
 			break;
 
+#ifdef BIO_CTRL_GET_KTLS_SEND
+		case BIO_CTRL_GET_KTLS_SEND:
+#endif
+#ifdef BIO_CTRL_GET_KTLS_RECV
+		case BIO_CTRL_GET_KTLS_RECV:
+#endif
+#if defined(BIO_CTRL_GET_KTLS_SEND) || defined(BIO_CTRL_GET_KTLS_RECV)
+			/* This callback-based transport does not enable kernel TLS. */
+			status = 0;
+			break;
+#endif
+
 		case BIO_C_GET_FD:
 		case BIO_C_SET_FD:
 			status = -1;
