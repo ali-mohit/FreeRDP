@@ -1541,6 +1541,50 @@ out:
 	return FALSE;
 }
 
+static BOOL test_tiled_position_before_size(xfContext* xfc)
+{
+	const unsigned beforeRequests = xMoves;
+	const unsigned beforeMoves = moves;
+	appWindow.local_move.state = LMS_TERMINATING;
+	appWindow.localMoveGeometryTime = winpr_GetTickCount64NS();
+	appWindow.local_move.positionGeneration = appWindow.serverPositionGeneration;
+	appWindow.local_move.sizeGeneration = appWindow.serverSizeGeneration;
+	appWindow.serverMoveActive = TRUE;
+	appWindow.windowGeometryPending = FALSE;
+	appWindow.x = 993;
+	appWindow.y = 32;
+	appWindow.width = 927;
+	appWindow.height = 1168;
+	appWindow.windowWidth = 1224;
+	appWindow.windowHeight = 656;
+	/* End and position-only orders can describe the pre-tile drag. Neither
+	 * may reapply the cached normal dimensions over the final native tile. */
+	const RAIL_LOCALMOVESIZE_ORDER end = { .windowId = (UINT32)appWindow.windowId,
+		                                   .moveSizeType = RAIL_WMSZ_MOVE,
+		                                   .posX = 1668,
+		                                   .posY = 389 };
+	CHECK(xfc->rail->ServerLocalMoveSize(xfc->rail, &end) == CHANNEL_RC_OK);
+	CHECK(xMoves == beforeRequests && appWindow.width == 927 && appWindow.height == 1168);
+	WINDOW_ORDER_INFO info = { .windowId = appWindow.windowId,
+		                       .fieldFlags = WINDOW_ORDER_FIELD_WND_OFFSET };
+	WINDOW_STATE_ORDER state = { .windowOffsetX = 1668, .windowOffsetY = 389 };
+	CHECK(apply_server_update(&xfc->common.context, &info, &state));
+	CHECK(xMoves == beforeRequests && appWindow.localMoveGeometryTime != 0);
+	CHECK(appWindow.x == 993 && appWindow.y == 32 && appWindow.height == 1168);
+	info.fieldFlags |= WINDOW_ORDER_FIELD_WND_SIZE;
+	state.windowOffsetX = 993;
+	state.windowOffsetY = 32;
+	state.windowWidth = 927;
+	state.windowHeight = 1168;
+	CHECK(apply_server_update(&xfc->common.context, &info, &state));
+	CHECK(appWindow.localMoveGeometryTime == 0 && xMoves == beforeRequests);
+	CHECK(appWindow.windowOffsetX == 993 && appWindow.windowHeight == 1168);
+	CHECK(moves == beforeMoves);
+	return TRUE;
+out:
+	return FALSE;
+}
+
 int main(int argc, char* argv[])
 {
 	WINPR_UNUSED(argc);
@@ -1589,6 +1633,7 @@ int main(int argc, char* argv[])
 	CHECK(test_resize_style_transitions(&xfc));
 	CHECK(test_requested_observed_geometry(&xfc));
 	CHECK(test_move_end_position(&xfc));
+	CHECK(test_tiled_position_before_size(&xfc));
 	result = 0;
 out:
 	if (railInitialized)

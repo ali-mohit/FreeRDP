@@ -935,7 +935,14 @@ static BOOL xf_rail_window_common(rdpContext* context, const WINDOW_ORDER_INFO* 
 		 * do not wait for an exact echo or permanently suppress retries. */
 		appWindow->windowMovePending = FALSE;
 	}
-	if ((fieldFlags & (WINDOW_ORDER_FIELD_WND_OFFSET | WINDOW_ORDER_FIELD_WND_SIZE)) &&
+	/* A position-only order after local tiling may still use the old size.
+	 * Do not replay that cached rectangle before its size acknowledgement. */
+	const BOOL awaitingSize = appWindow->localMoveGeometryTime &&
+	                          !(fieldFlags & WINDOW_ORDER_FIELD_WND_SIZE) &&
+	                          ((appWindow->width != (INT64)appWindow->windowWidth) ||
+	                           (appWindow->height != (INT64)appWindow->windowHeight));
+	if (!awaitingSize &&
+	    (fieldFlags & (WINDOW_ORDER_FIELD_WND_OFFSET | WINDOW_ORDER_FIELD_WND_SIZE)) &&
 	    ((appWindow->local_move.state == LMS_TERMINATING) ||
 	     (appWindow->local_move.state == LMS_NOT_ACTIVE)))
 		appWindow->localMoveGeometryTime = 0;
@@ -1115,7 +1122,7 @@ static BOOL xf_rail_window_common(rdpContext* context, const WINDOW_ORDER_INFO* 
 		 * it is hidden in some cases this can cause the window not to restore back to its original
 		 * size. Therefore we don't update our local window when that rail window state is minimized
 		 */
-		if (appWindow->rail_state != WINDOW_SHOW_MINIMIZED)
+		if ((appWindow->rail_state != WINDOW_SHOW_MINIMIZED) && !awaitingSize)
 		{
 			const BOOL maximized = (appWindow->dwStyle & WS_MAXIMIZE) != 0;
 			/* Leave maximized windows to the WM, which honors the work area. */
@@ -1632,7 +1639,11 @@ static UINT xf_rail_server_local_move_size(RailClientContext* context,
 		/* A Window Information position received during the gesture takes
 		 * precedence. Otherwise the end PDU supplies the signed final position;
 		 * its coordinates are not pointer offsets and contain no dimensions. */
+		const BOOL awaitingSize = (appWindow->local_move.state == LMS_TERMINATING) &&
+		                          ((appWindow->width != (INT64)appWindow->windowWidth) ||
+		                           (appWindow->height != (INT64)appWindow->windowHeight));
 		const BOOL usePosition =
+		    !awaitingSize &&
 		    (appWindow->serverMoveActive || appWindow->local_move.state != LMS_NOT_ACTIVE) &&
 		    (appWindow->serverPositionGeneration == appWindow->local_move.positionGeneration);
 		const BOOL sized = appWindow->serverSizeGeneration != appWindow->local_move.sizeGeneration;
